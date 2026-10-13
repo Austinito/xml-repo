@@ -27,6 +27,8 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.TOPGOLFCI_TOKEN }}
       REPO: ${{ github.repository }}
+      # Test repo only: the sole account can't approve its own PRs. Real repo requires approval.
+      REQUIRE_APPROVAL: "false"
     steps:
       - name: Merge the oldest approved "ready to merge" PR
         shell: bash
@@ -66,7 +68,7 @@ jobs:
               continue
             fi
 
-            if [ "$(jq -r '.reviewDecision' <<< "$pr_data")" != "APPROVED" ]; then
+            if [ "$REQUIRE_APPROVAL" = "true" ] && [ "$(jq -r '.reviewDecision' <<< "$pr_data")" != "APPROVED" ]; then
               echo "PR #$pr_number is not approved — skipping."
               continue
             fi
