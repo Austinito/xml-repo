@@ -1,0 +1,126 @@
+name: Auto Merge Ready PRs
+
+on:
+  # Chain: each finished release of main triggers the next merge attempt; the
+  # merge (made with a PAT, so it triggers push workflows) starts the next release.
+  workflow_run:
+    workflows:
+      - Semantic Release
+    types:
+      - completed
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  auto-merge:
+    name: Squash and merge the oldest approved "ready to merge" PR
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    concurrency:
+      group: auto-merge-ready-prs
+      cancel-in-progress: false
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    env:
+      GH_TOKEN: ${{ secrets.TOPGOLFCI_TOKEN }}
+      REPO: ${{ github.repository }}
+    steps:
+      - name: Merge the oldest approved "ready to merge" PR
+        shell: bash
+        run: |
+          set -eo pipefail
+          run_url="https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+
+          # Slack is stubbed in this copy: log what would have been posted.
+          post_slack() {
+            echo "[slack stub] would post to Slack: $1"
+          }
+
+          slack_mention() {
+            echo "@$1"
+          }
+
+          # Oldest-first open PRs labeled "ready to merge".
+          mapfile -t prs < <(gh pr list --repo "$REPO" --state open --label "ready to merge" --limit 50 \
+            --json number,title,url,author,isDraft,headRefOid,reviewDecision,createdAt \
+            --jq 'sort_by(.createdAt) | .[] | @json')
+          if [ "${#prs[@]}" -eq 0 ]; then
+            echo "No open PRs labeled 'ready to merge' — nothing to do."
+            exit 0
+          fi
+
+          # Merge at most one PR per run: the release it triggers starts the next attempt.
+          for pr_data in "${prs[@]}"; do
+            pr_number="$(jq -r '.number' <<< "$pr_data")"
+            pr_title="$(jq -r '.title' <<< "$pr_data")"
+            pr_url="$(jq -r '.url' <<< "$pr_data")"
+            pr_author="$(jq -r '.author.login' <<< "$pr_data")"
+            pr_sha="$(jq -r '.headRefOid' <<< "$pr_data")"
+            echo "Candidate PR #$pr_number by $pr_author"
+
+            if [ "$(jq -r '.isDraft' <<< "$pr_data")" = "true" ]; then
+              echo "PR #$pr_number is a draft — skipping."
+              continue
+            fi
+
+            if [ "$(jq -r '.reviewDecision' <<< "$pr_data")" != "APPROVED" ]; then
+              echo "PR #$pr_number is not approved — skipping."
+              continue
+            fi
+
+            # Server-side mergeability matches what the squash merge will do; it can
+            # be UNKNOWN right after main moves, so give GitHub a few tries.
+            mergeable="UNKNOWN"
+            for _ in 1 2 3 4 5; do
+              mergeable="$(gh pr view "$pr_number" --repo "$REPO" --json mergeable --jq '.mergeable')"
+              [ "$mergeable" != "UNKNOWN" ] && break
+              sleep 5
+            done
+            if [ "$mergeable" = "CONFLICTING" ]; then
+              echo "::warning::PR #$pr_number has merge conflicts against main — skipping."
+              post_slack ":warning: *Auto-merge skipped:* <$pr_url|#$pr_number $pr_title>"$'\n'"$(slack_mention "$pr_author"), this PR has merge conflicts against main and was skipped by the auto-merge workflow. Please resolve the conflicts manually."$'\n'"<$run_url|View the run>"
+              continue
+            fi
+            if [ "$mergeable" != "MERGEABLE" ]; then
+              echo "PR #$pr_number mergeability is $mergeable — skipping."
+              continue
+            fi
+
+            # All checks must be done and passing. --watch lets checks that are
+            # still running settle; non-zero exit means failed, pending or none.
+            if ! timeout 600 gh pr checks "$pr_number" --repo "$REPO" --watch --interval 15; then
+              echo "::warning::PR #$pr_number has failing or pending CI checks — skipping."
+              continue
+            fi
+
+            # Pin the head so a push after the checks passed cannot be merged unreviewed.
+            if ! gh pr merge "$pr_number" --repo "$REPO" --squash --match-head-commit "$pr_sha"; then
+              echo "::warning::Merging PR #$pr_number failed — skipping."
+              continue
+            fi
+            echo "Merged PR #$pr_number."
+
+            post_slack ":white_check_mark: *Auto-merged:* <$pr_url|#$pr_number $pr_title> (by $(slack_mention "$pr_author"))"$'\n'"<$run_url|View the run>"
+            break
+          done
+
+  # A failed release means the merge chain stops here (the job above only runs after
+  # a successful release). Cancelled runs are skipped: a newer push to main cancels
+  # the older release run, and that newer run carries the chain on.
+  notify-release-failure:
+    name: Notify that the release failed
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: github.event_name == 'workflow_run' && (github.event.workflow_run.conclusion == 'failure' || github.event.workflow_run.conclusion == 'timed_out')
+    env:
+      COMMIT_MESSAGE: ${{ github.event.workflow_run.head_commit.message }}
+      RELEASE_RUN_URL: ${{ github.event.workflow_run.html_url }}
+    steps:
+      - name: Log what would be posted to Slack
+        shell: bash
+        run: |
+          title="$(head -n 1 <<< "$COMMIT_MESSAGE")"
+          echo "[slack stub] would post: Release failed on main: $title — $RELEASE_RUN_URL"
