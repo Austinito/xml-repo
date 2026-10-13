@@ -1,0 +1,13 @@
+name: PR Checks
+
+# Stub check so `gh pr checks` has something to report on pull requests.
+on:
+  pull_request:
+
+jobs:
+  check:
+    name: Stub check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: echo "checks pass"
