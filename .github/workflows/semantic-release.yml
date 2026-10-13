@@ -1,0 +1,19 @@
+name: Semantic Release
+
+# Stub standing in for the real release workflow: it only needs to exist, run on
+# pushes to main and finish, so the auto-merge workflow can chain off it.
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  release:
+    name: Stub release
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Pretend to release
+        run: |
+          echo "Stub release for ${GITHUB_SHA}"
+          sleep 10
